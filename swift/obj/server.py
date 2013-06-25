@@ -16,6 +16,7 @@
 """ Object Server for Swift """
 
 from __future__ import with_statement
+import base64
 import cPickle as pickle
 import errno
 import os
@@ -23,7 +24,7 @@ import time
 import traceback
 from collections import defaultdict
 from datetime import datetime
-from hashlib import md5
+from hashlib import md5, sha256
 from tempfile import mkstemp
 from urllib import unquote
 from contextlib import contextmanager
@@ -778,6 +779,8 @@ class ObjectController(object):
         orig_timestamp = disk_file.metadata.get('X-Timestamp')
         upload_expiration = time.time() + self.max_upload_time
         etag = md5()
+        compute_strong_etag = 'x-content-sha256' in request.headers
+        strong_etag = sha256()
         elapsed_time = 0
         try:
             with disk_file.writer(size=fsize) as writer:
@@ -788,6 +791,8 @@ class ObjectController(object):
                         self.logger.increment('PUT.timeouts')
                         return HTTPRequestTimeout(request=request)
                     etag.update(chunk)
+                    if compute_strong_etag:
+                        strong_etag.update(chunk)
                     writer.write(chunk)
                     sleep()
                     elapsed_time += time.time() - start_time
@@ -801,6 +806,10 @@ class ObjectController(object):
                 etag = etag.hexdigest()
                 if 'etag' in request.headers and \
                         request.headers['etag'].lower() != etag:
+                    return HTTPUnprocessableEntity(request=request)
+                if compute_strong_etag and \
+                        request.headers['x-content-sha256'] != \
+                        base64.standard_b64encode(strong_etag.digest()):
                     return HTTPUnprocessableEntity(request=request)
                 metadata = {
                     'X-Timestamp': request.headers['x-timestamp'],

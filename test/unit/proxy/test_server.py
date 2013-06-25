@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from __future__ import with_statement
+import base64
 import cPickle as pickle
 import logging
 import os
@@ -26,7 +27,7 @@ from gzip import GzipFile
 from shutil import rmtree
 import time
 from urllib import quote
-from hashlib import md5
+from hashlib import md5, sha256
 from tempfile import mkdtemp
 import random
 
@@ -879,6 +880,109 @@ class TestObjectController(unittest.TestCase):
         fd.flush()
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 400'
+        self.assertEqual(headers[:len(exp)], exp)
+
+    # MD5 hash collision from: http://tinyurl.com/3l5nxjs
+    data1 = (
+            'd131dd02c5e6eec4693d9a0698aff95c'
+            '2fcab58712467eab4004583eb8fb7f89'
+            '55ad340609f4b30283e488832571415a'
+            '085125e8f7cdc99fd91dbdf280373c5b'
+            'd8823e3156348f5bae6dacd436c919c6'
+            'dd53e2b487da03fd02396306d248cda0'
+            'e99f33420f577ee8ce54b67080a80d1e'
+            'c69821bcb6a8839396f9652b6ff72a70').decode('hex')
+    data2 = (
+            'd131dd02c5e6eec4693d9a0698aff95c'
+            '2fcab50712467eab4004583eb8fb7f89'
+            '55ad340609f4b30283e4888325f1415a'
+            '085125e8f7cdc99fd91dbd7280373c5b'
+            'd8823e3156348f5bae6dacd436c919c6'
+            'dd53e23487da03fd02396306d248cda0'
+            'e99f33420f577ee8ce54b67080280d1e'
+            'c69821bcb6a8839396f965ab6ff72a70').decode('hex')
+
+    def test_PUT_good_etag(self):
+        prolis = _test_sockets[0]
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/c/o.chunked HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Connection: close\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Etag: %s\r\n'
+                 'Content-Type: application/octet-stream\r\n'
+                 'Content-Length: %d\r\n\r\n'
+                 '%s\n' % (
+                 md5(self.data1).hexdigest(),
+                 len(self.data1), self.data1))
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEqual(headers[:len(exp)], exp)
+
+    def test_PUT_bad_etag(self):
+        prolis = _test_sockets[0]
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/c/o.chunked HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Connection: close\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Etag: %s\r\n'
+                 'Content-Type: application/octet-stream\r\n'
+                 'Content-Length: %d\r\n\r\n'
+                 '%s\n' % (
+                 md5(self.data1 + 'corrupt').hexdigest(),
+                 len(self.data1), self.data1))
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 422'
+        self.assertEqual(headers[:len(exp)], exp)
+
+    def test_PUT_good_x_content_sha256(self):
+        prolis = _test_sockets[0]
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/c/o.chunked HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Connection: close\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Etag: %s\r\n'
+                 'X-Content-SHA256: %s\r\n'
+                 'Content-Type: application/octet-stream\r\n'
+                 'Content-Length: %d\r\n\r\n'
+                 '%s\n' % (
+                 md5(self.data1).hexdigest(),
+                 base64.standard_b64encode(sha256(self.data1).digest()),
+                 len(self.data1), self.data1))
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEqual(headers[:len(exp)], exp)
+
+    def test_PUT_bad_x_content_sha256(self):
+        assert len(self.data1) == len(self.data2)
+        assert md5(self.data1).digest() == md5(self.data2).digest()
+        assert sha256(self.data1).digest() != sha256(self.data2).digest()
+        prolis = _test_sockets[0]
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/c/o.chunked HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Connection: close\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Etag: %s\r\n'
+                 'X-Content-SHA256: %s\r\n'
+                 'Content-Type: application/octet-stream\r\n'
+                 'Content-Length: %d\r\n\r\n'
+                 '%s\n' % (
+                 md5(self.data1).hexdigest(),
+                 base64.standard_b64encode(sha256(self.data1).digest()),
+                 len(self.data1), self.data2))  # note incorrect payload
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 422'
         self.assertEqual(headers[:len(exp)], exp)
 
     def test_PUT_message_length_unsup_xfr_encoding(self):
